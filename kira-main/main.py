@@ -154,9 +154,9 @@ def index():
         users = User.query.all()
         return render_template('index.html', users=users)
     elif current_user.role == 'user':
-        return render_template('user_profile.html')
+        return render_template('welcome_temp.html')
     else:
-        return redirect(url_for('update_profile'))
+        return redirect(url_for('user_inicio'))
 
 
 
@@ -316,7 +316,7 @@ def update_profile():
 def login():
     if request.method == 'GET':
         if current_user.is_authenticated:
-            return redirect(url_for('user_inicio'))
+            return redirect(url_for('welcome_temp.html'))
         return render_template('login.html')
 
     elif request.method == 'POST':
@@ -356,8 +356,8 @@ def login():
             return jsonify({'success': False, 'message': 'Error en el proceso de inicio de sesión.'})
 
 # Configuración de Twilio
-TWILIO_ACCOUNT_SID = 'ACac0e9cca0354e194ec3c4666573e5ad9' #no me eja subir mis credenciales asi q falta rellenar
-TWILIO_AUTH_TOKEN = 'd959a22251931e8ddc564dc8cd1c5875' #igual aqui
+TWILIO_ACCOUNT_SID = 'vacio' #no me eja subir mis credenciales asi q falta rellenar
+TWILIO_AUTH_TOKEN = 'vacio' #igual aqui
 #TWILIO_WHATSAPP_NUMBER = '+14155238886'  # Formato: 'whatsapp:+14155238886'
 TWILIO_WHATSAPP_NUMBER = '+14155238886'  # Formato: 'whatsapp:+14155238886'
 
@@ -643,7 +643,7 @@ def facial_verification():
                 return jsonify({
                     'success': True,
                     'message': 'Verificación facial exitosa.',
-                    'redirect': url_for('user_inicio')
+                    'redirect': url_for('welcome_temp')
                 })
             else:
                 return jsonify({
@@ -658,6 +658,11 @@ def facial_verification():
                 'message': 'Error en la verificación. Por favor, intente de nuevo.'
             })
         
+@app.route('/welcome_temp')
+def welcome_temp():
+    username = request.args.get('username', 'Usuario')
+    return render_template('welcome_temp.html', username=username)
+
 @app.route('/user_inicio')
 @login_required  # Asegura que solo usuarios autenticados puedan acceder
 def user_inicio():
