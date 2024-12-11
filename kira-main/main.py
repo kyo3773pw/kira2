@@ -316,7 +316,7 @@ def update_profile():
 def login():
     if request.method == 'GET':
         if current_user.is_authenticated:
-            return redirect(url_for('welcome_temp.html'))
+            return redirect(url_for('welcome_temp'))
         return render_template('login.html')
 
     elif request.method == 'POST':
@@ -356,8 +356,8 @@ def login():
             return jsonify({'success': False, 'message': 'Error en el proceso de inicio de sesión.'})
 
 # Configuración de Twilio
-TWILIO_ACCOUNT_SID = 'vacio' #no me eja subir mis credenciales asi q falta rellenar
-TWILIO_AUTH_TOKEN = 'vacio' #igual aqui
+TWILIO_ACCOUNT_SID = 'ACac0e9cca0354e194ec3c4666573e5ad9' #no me eja subir mis credenciales asi q falta rellenar
+TWILIO_AUTH_TOKEN = 'd959a22251931e8ddc564dc8cd1c5875' #igual aqui
 #TWILIO_WHATSAPP_NUMBER = '+14155238886'  # Formato: 'whatsapp:+14155238886'
 TWILIO_WHATSAPP_NUMBER = '+14155238886'  # Formato: 'whatsapp:+14155238886'
 
@@ -659,9 +659,461 @@ def facial_verification():
             })
         
 @app.route('/welcome_temp')
+@login_required
 def welcome_temp():
-    username = request.args.get('username', 'Usuario')
+    username = current_user.username  # Obtenemos el nombre del usuario logueado
     return render_template('welcome_temp.html', username=username)
+
+class LoginRecord(db.Model):
+    __tablename__ = 'login_record'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    login_datetime = db.Column(db.DateTime, nullable=False)
+    ip_address = db.Column(db.String(45))  # Falta este campo
+    user_agent = db.Column(db.String(255))
+
+    # Relación con el modelo User
+    user = db.relationship('User', backref=db.backref('login_records', lazy=True))
+
+def record_user_login(user):
+    """
+    Registra el inicio de sesión de un usuario
+    
+    Args:
+        user: Instancia del modelo User que ha iniciado sesión
+    """
+    try:
+        # Crear zona horaria para Perú
+        peru_tz = pytz.timezone('America/Lima')
+        
+        # Obtener la hora actual en la zona horaria de Perú
+        current_time = datetime.now(peru_tz)
+        
+        # Crear nuevo registro de inicio de sesión
+        login_record = LoginRecord(
+            user_id=user.id,
+            login_datetime=current_time,
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string
+        )
+        
+        # Guardar en la base de datos
+        db.session.add(login_record)
+        db.session.commit()
+        
+        # Registrar en el log del sistema
+        app.logger.info(f"Login exitoso registrado para el usuario {user.username} at {current_time}")
+        
+    except Exception as e:
+        # En caso de error, hacer rollback y registrar el error
+        db.session.rollback()
+        app.logger.error(f"Error al registrar el login del usuario {user.username}: {str(e)}")
+        raise
+    
+# Ruta para ver el historial de inicios de sesión (solo para administradores)
+@app.route('/login_history', methods=['GET'])
+@login_required
+@admin_required
+def view_login_history():
+    """
+    Vista para que los administradores puedan ver el historial de inicios de sesión
+    """
+    # Obtener todos los registros de login ordenados por fecha descendente
+    login_records = LoginRecord.query.order_by(LoginRecord.login_datetime.desc()).all()
+    
+    return render_template(
+        'login_history.html',
+        login_records=login_records
+    )
+
+@app.route('/admin/user_login_history', methods=['GET'])
+@login_required
+@admin_required  # Asegura que solo los administradores puedan acceder
+def admin_user_login_history():
+    """
+    Vista administrativa para mostrar el historial de inicios de sesión de un usuario específico
+    basado en su nombre de usuario (username). Solo accesible por administradores.
+    
+    Args:
+        username (str): Nombre de usuario del cual se quiere ver el historial
+    """
+    try:
+        # Obtener el username desde los parámetros GET
+        username = request.args.get('username')
+        if not username:
+            return jsonify({
+                'success': False,
+                'message': 'El nombre de usuario es obligatorio.'
+            }), 400
+
+        # Obtener el usuario del cual se quiere ver el historial
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            return jsonify({
+                'success': False,
+                'message': 'Usuario no encontrado.'
+            }), 404
+
+        # Obtener los registros de login ordenados por fecha descendente
+        login_records = LoginRecord.query.filter_by(user_id=user.id)\
+            .order_by(LoginRecord.login_datetime.desc())\
+            .all()
+
+        # Crear un resumen de la actividad
+        peru_tz = pytz.timezone('America/Lima')
+        current_time = datetime.now(peru_tz)
+        
+        # Obtener estadísticas para los gráficos
+        stats = generate_login_statistics(login_records)
+
+        login_summary = {
+            'total_logins': len(login_records),
+            'last_login': login_records[0].login_datetime if login_records else None,
+            'user_info': {
+                'username': user.username,
+                'id': user.id
+            },
+            'report_generated': current_time,
+            'daily_average': stats['daily_average'],
+            'most_active_day': stats['most_active_day'],
+            'most_active_hour': stats['most_active_hour']
+        }
+
+        # Si es una solicitud AJAX, devolver JSON
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({
+                'success': True,
+                'data': {
+                    'summary': login_summary,
+                    'chart_data': stats['chart_data'],
+                    'records': [{
+                        'datetime': record.login_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+                        'ip_address': record.ip_address,
+                        'user_agent': record.user_agent
+                    } for record in login_records]
+                }
+            })
+
+        # Si no es AJAX, renderizar template
+        return render_template(
+            'admin/user_login_history.html',
+            user=user,
+            login_records=login_records,
+            summary=login_summary,
+            chart_data=stats['chart_data']
+        )
+
+    except Exception as e:
+        app.logger.error(f"Error al obtener historial de login para usuario {username}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Error al generar el reporte de inicio de sesión.'
+        }), 500
+
+
+def generate_login_statistics(login_records):
+    """
+    Genera estadísticas detalladas de los inicios de sesión.
+    """
+    stats = {
+        'daily_average': 0,
+        'most_active_day': 'N/A',
+        'most_active_hour': 'N/A',
+        'chart_data': {
+            'hourly_distribution': [],
+            'weekly_distribution': [],
+            'monthly_trend': []
+        },
+        'insufficient_data': False
+    }
+
+    if not login_records:
+        stats['insufficient_data'] = True
+        return stats
+
+    # Preparar contadores
+    hourly_counts = defaultdict(int)
+    weekday_counts = defaultdict(int)
+    monthly_counts = defaultdict(int)
+    daily_counts = defaultdict(int)
+
+    # Procesar cada registro
+    for record in login_records:
+        date = record.login_datetime.date()
+        hour = record.login_datetime.hour
+        weekday = record.login_datetime.weekday()
+        month = record.login_datetime.strftime('%Y-%m')
+
+        daily_counts[date] += 1
+        hourly_counts[hour] += 1
+        weekday_counts[weekday] += 1
+        monthly_counts[month] += 1
+
+    # Verificar si hay suficientes días de datos
+    if len(daily_counts) < 3:
+        stats['insufficient_data'] = True
+        
+        # Calcular lo que se pueda con los datos disponibles
+        if daily_counts:
+            total_logins = sum(daily_counts.values())
+            stats['daily_average'] = round(total_logins / len(daily_counts), 2)
+            
+            most_active_date = max(daily_counts.items(), key=lambda x: x[1])[0]
+            stats['most_active_day'] = most_active_date.strftime('%Y-%m-%d')
+            
+            most_active_hour = max(hourly_counts.items(), key=lambda x: x[1])[0]
+            stats['most_active_hour'] = f"{most_active_hour:02d}:00"
+
+    # Si hay 3 o más días de datos
+    if not stats['insufficient_data']:
+        total_days = (max(daily_counts.keys()) - min(daily_counts.keys())).days + 1
+        total_logins = sum(daily_counts.values())
+        stats['daily_average'] = round(total_logins / max(total_days, 1), 2)
+        
+        most_active_date = max(daily_counts.items(), key=lambda x: x[1])[0]
+        stats['most_active_day'] = most_active_date.strftime('%Y-%m-%d')
+        
+        most_active_hour = max(hourly_counts.items(), key=lambda x: x[1])[0]
+        stats['most_active_hour'] = f"{most_active_hour:02d}:00"
+
+    # Preparar datos para los gráficos
+    # 1. Distribución por hora
+    stats['chart_data']['hourly_distribution'] = {
+        'labels': [f"{hour:02d}:00" for hour in range(24)],
+        'data': [hourly_counts[hour] for hour in range(24)],
+        'backgroundColor': 'rgba(59, 130, 246, 0.5)',
+        'borderColor': 'rgb(59, 130, 246)'
+    }
+
+    # 2. Distribución semanal
+    days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+    stats['chart_data']['weekly_distribution'] = {
+        'labels': days,
+        'data': [weekday_counts[day] for day in range(7)],
+        'backgroundColor': 'rgba(16, 185, 129, 0.5)',
+        'borderColor': 'rgb(16, 185, 129)'
+    }
+
+    # 3. Tendencia mensual
+    current_date = datetime.now()
+    months = []
+    month_data = []
+    for i in range(5, -1, -1):
+        date = current_date - timedelta(days=30*i)
+        month = date.strftime('%Y-%m')
+        months.append(date.strftime('%B %Y'))
+        month_data.append(monthly_counts[month])
+
+    stats['chart_data']['monthly_trend'] = {
+        'labels': months,
+        'data': month_data,
+        'borderColor': 'rgb(99, 102, 241)',
+        'fill': False
+    }
+
+    return stats
+
+def generate_global_login_statistics(login_records):
+    """
+    Genera estadísticas detalladas de los inicios de sesión para todos los usuarios.
+    """
+    stats = {
+        'global_stats': {
+            'total_logins': 0,
+            'daily_average': 0,
+            'most_active_day': 'N/A',
+            'most_active_hour': 'N/A',
+            'most_active_user': 'N/A',
+            'insufficient_data': False,
+            'chart_data': {
+                'hourly_distribution': [],
+                'weekly_distribution': [],
+                'monthly_trend': [],
+                'user_distribution': []
+            }
+        },
+        'user_stats': {}  # Estadísticas individuales por usuario
+    }
+
+    if not login_records:
+        stats['global_stats']['insufficient_data'] = True
+        return stats
+
+    # Preparar contadores globales
+    hourly_counts = defaultdict(int)
+    weekday_counts = defaultdict(int)
+    monthly_counts = defaultdict(int)
+    daily_counts = defaultdict(int)
+    user_counts = defaultdict(int)
+    
+    # Contadores por usuario
+    user_daily_counts = defaultdict(lambda: defaultdict(int))
+    user_hourly_counts = defaultdict(lambda: defaultdict(int))
+    
+    # Procesar cada registro
+    for record in login_records:
+        date = record.login_datetime.date()
+        hour = record.login_datetime.hour
+        weekday = record.login_datetime.weekday()
+        month = record.login_datetime.strftime('%Y-%m')
+        username = record.user.username
+
+        # Conteos globales
+        daily_counts[date] += 1
+        hourly_counts[hour] += 1
+        weekday_counts[weekday] += 1
+        monthly_counts[month] += 1
+        user_counts[username] += 1
+        
+        # Conteos por usuario
+        user_daily_counts[username][date] += 1
+        user_hourly_counts[username][hour] += 1
+
+    # Verificar si hay suficientes días de datos
+    if len(daily_counts) < 3:
+        stats['global_stats']['insufficient_data'] = True
+        
+        # Calcular lo que se pueda con los datos disponibles
+        if daily_counts:
+            total_logins = sum(daily_counts.values())
+            stats['global_stats']['total_logins'] = total_logins
+            stats['global_stats']['daily_average'] = round(
+                total_logins / len(daily_counts), 
+                2
+            )
+            
+            most_active_date = max(daily_counts.items(), key=lambda x: x[1])[0]
+            stats['global_stats']['most_active_day'] = most_active_date.strftime('%Y-%m-%d')
+            
+            most_active_hour = max(hourly_counts.items(), key=lambda x: x[1])[0]
+            stats['global_stats']['most_active_hour'] = f"{most_active_hour:02d}:00"
+            
+            most_active_user = max(user_counts.items(), key=lambda x: x[1])[0]
+            stats['global_stats']['most_active_user'] = most_active_user
+
+    # Si hay 3 o más días de datos
+    if not stats['global_stats']['insufficient_data']:
+        total_days = (max(daily_counts.keys()) - min(daily_counts.keys())).days + 1
+        stats['global_stats']['total_logins'] = sum(daily_counts.values())
+        stats['global_stats']['daily_average'] = round(
+            stats['global_stats']['total_logins'] / max(total_days, 1), 
+            2
+        )
+        
+        # Día más activo
+        most_active_date = max(daily_counts.items(), key=lambda x: x[1])[0]
+        stats['global_stats']['most_active_day'] = most_active_date.strftime('%Y-%m-%d')
+        
+        # Hora más activa
+        most_active_hour = max(hourly_counts.items(), key=lambda x: x[1])[0]
+        stats['global_stats']['most_active_hour'] = f"{most_active_hour:02d}:00"
+        
+        # Usuario más activo
+        most_active_user = max(user_counts.items(), key=lambda x: x[1])[0]
+        stats['global_stats']['most_active_user'] = most_active_user
+
+    # Preparar datos para los gráficos globales
+    # 1. Distribución por hora
+    stats['global_stats']['chart_data']['hourly_distribution'] = {
+        'labels': [f"{hour:02d}:00" for hour in range(24)],
+        'data': [hourly_counts[hour] for hour in range(24)],
+        'backgroundColor': 'rgba(59, 130, 246, 0.5)',
+        'borderColor': 'rgb(59, 130, 246)'
+    }
+
+    # 2. Distribución semanal
+    days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+    stats['global_stats']['chart_data']['weekly_distribution'] = {
+        'labels': days,
+        'data': [weekday_counts[day] for day in range(7)],
+        'backgroundColor': 'rgba(16, 185, 129, 0.5)',
+        'borderColor': 'rgb(16, 185, 129)'
+    }
+
+    # 3. Tendencia mensual
+    current_date = datetime.now()
+    months = []
+    month_data = []
+    for i in range(5, -1, -1):
+        date = current_date - timedelta(days=30*i)
+        month = date.strftime('%Y-%m')
+        months.append(date.strftime('%B %Y'))
+        month_data.append(monthly_counts[month])
+
+    stats['global_stats']['chart_data']['monthly_trend'] = {
+        'labels': months,
+        'data': month_data,
+        'borderColor': 'rgb(99, 102, 241)',
+        'fill': False
+    }
+
+    # 4. Distribución por usuario (top 10 usuarios más activos)
+    top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    stats['global_stats']['chart_data']['user_distribution'] = {
+        'labels': [user[0] for user in top_users],
+        'data': [user[1] for user in top_users],
+        'backgroundColor': 'rgba(124, 58, 237, 0.5)',
+        'borderColor': 'rgb(124, 58, 237)'
+    }
+
+    # Generar estadísticas por usuario
+    for username in user_counts.keys():
+        user_dates = user_daily_counts[username].keys()
+        if user_dates:
+            total_user_days = len(user_dates)
+            total_user_logins = user_counts[username]
+            
+            # Hora más activa del usuario
+            user_peak_hour = max(user_hourly_counts[username].items(), key=lambda x: x[1])[0]
+            
+            stats['user_stats'][username] = {
+                'total_logins': total_user_logins,
+                'daily_average': round(total_user_logins / max(total_user_days, 1), 2),
+                'peak_hour': f"{user_peak_hour:02d}:00",
+                'percentage_of_total': round(
+                    (total_user_logins / stats['global_stats']['total_logins']) * 100, 
+                    2
+                )
+            }
+
+    return stats
+
+# Ruta para ver las estadísticas globales de inicio de sesión
+@app.route('/admin/global_login_statistics', methods=['GET'])
+@login_required
+@admin_required
+def view_global_login_statistics():
+    """
+    Vista administrativa para mostrar estadísticas globales de inicio de sesión
+    de todos los usuarios. Solo accesible por administradores.
+    """
+    try:
+        # Obtener todos los registros de login
+        login_records = LoginRecord.query.all()
+        
+        # Generar estadísticas
+        stats = generate_global_login_statistics(login_records)
+        
+        # Si es una solicitud AJAX, devolver JSON
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({
+                'success': True,
+                'data': stats
+            })
+        
+        # Si no es AJAX, renderizar template
+        return render_template(
+            'global_login_statistics.html',
+            stats=stats,
+            insufficient_data=stats['global_stats']['insufficient_data']
+        )
+        
+    except Exception as e:
+        app.logger.error(f"Error al generar estadísticas globales de login: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Error al generar las estadísticas globales de inicio de sesión.'
+        }), 500
 
 @app.route('/user_inicio')
 @login_required  # Asegura que solo usuarios autenticados puedan acceder
